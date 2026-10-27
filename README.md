@@ -27,9 +27,9 @@ A Paper 1.20+ Minecraft plugin that introduces custom death/kill potion effect m
 
 | Command | Aliases | Description | Cost Formula |
 | :--- | :--- | :--- | :--- |
-| `/buyeffect` | `/buygood` | Purchases a random unowned permanent positive effect | 20% of current balance (Minimum: $50,000) |
-| `/cureone` | *None* | Removes one active permanent negative effect | 10% of current balance (Minimum: $25,000) |
-| `/cureall` | *None* | Clears all active permanent negative effects | 30% of current balance (Minimum: $75,000) |
+| `/buyeffect` | `/buygood` | Purchases a random unowned permanent positive effect | defaults to 20% of current balance (Minimum: $50,000) |
+| `/cureone` | *None* | Removes one active permanent negative effect | defaults to 10% of current balance (Minimum: $25,000) |
+| `/cureall` | *None* | Clears all active permanent negative effects | defaults to 30% of current balance (Minimum: $75,000) |
 
 ---
 
