@@ -1,49 +1,51 @@
 # ==========================================
-#             PvPEffects Config             
+#             PvPEffects Config
 # ==========================================
+# Effect names use current Minecraft names (speed, strength, haste, ...).
+# Old names (INCREASE_DAMAGE, FAST_DIGGING, ...) are still accepted and auto-converted.
 
 # Maximum number of permanent positive effects a player can hold simultaneously.
-# Default is 3. Set to 0 for unlimited positive effects.
+# Set to 0 for unlimited.
 max-positive-effects: 3
 
 # Maximum number of permanent negative effects a player can hold simultaneously.
-# Default is 3. Set to 0 for unlimited negative effects.
+# Set to 0 for unlimited.
 max-negative-effects: 3
 
 # Maximum times a player can earn effects from killing the same victim.
-# Set to 1 for unique kills only. Set to 0 for unlimited kills per victim.
+# 1 = unique kills only. 0 = unlimited.
 max-kills-per-victim: 1
 
-# Pool of positive permanent effects awarded on unique player kills or bought via /buyeffect
+# Pool of positive permanent effects awarded on kills or bought via /buyeffect
 positive-effects:
-  - "SPEED"
-  - "INCREASE_DAMAGE"
-  - "REGENERATION"
-  - "FAST_DIGGING"
-  - "DAMAGE_RESISTANCE"
-  - "FIRE_RESISTANCE"
-  - "NIGHT_VISION"
+  - "speed"
+  - "strength"
+  - "regeneration"
+  - "haste"
+  - "resistance"
+  - "fire_resistance"
+  - "night_vision"
 
 # Pool of negative permanent effects applied on PvP death or temporarily on non-PvP death
 negative-effects:
-  - "SLOW"
-  - "WEAKNESS"
-  - "POISON"
-  - "SLOW_DIGGING"
-  - "BLINDNESS"
+  - "slowness"
+  - "weakness"
+  - "poison"
+  - "mining_fatigue"
+  - "blindness"
 
-# Settings for deaths caused by environment, mobs, or suicide
+# Deaths caused by environment, mobs, or suicide
 natural-death:
-  duration-seconds: 300 # Duration in seconds for temporary debuffs upon respawn
+  duration-seconds: 300
 
-# Economy settings (Requires Vault and an economy plugin like EssentialsX)
+# Economy settings (requires Vault + an economy plugin)
 pricing:
   buy-effect:
-    percentage: 20.0    # Takes 20% of player's balance
-    min-cost: 50000.0   # Minimum cost floor
+    percentage: 20.0
+    min-cost: 50000.0
   cure-one:
-    percentage: 10.0    # Takes 10% of player's balance
-    min-cost: 25000.0   # Minimum cost floor
+    percentage: 10.0
+    min-cost: 25000.0
   cure-all:
-    percentage: 30.0    # Takes 30% of player's balance
-    min-cost: 75000.0   # Minimum cost floor
+    percentage: 30.0
+    min-cost: 75000.0
