@@ -1,7 +1,10 @@
 package com.example.pvpeffects;
 
 import net.milkbowl.vault.economy.Economy;
+import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -12,8 +15,10 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityPotionEffectEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -27,13 +32,27 @@ import java.util.stream.Collectors;
 
 public final class PvpEffectsPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
-    private Economy econ = null;
+    /** Pre-1.20.3 effect names -> current registry keys, so old configs / players.yml keep working. */
+    private static final Map<String, String> LEGACY_NAMES = Map.ofEntries(
+            Map.entry("increase_damage", "strength"),
+            Map.entry("fast_digging", "haste"),
+            Map.entry("damage_resistance", "resistance"),
+            Map.entry("slow", "slowness"),
+            Map.entry("slow_digging", "mining_fatigue"),
+            Map.entry("jump", "jump_boost"),
+            Map.entry("confusion", "nausea"),
+            Map.entry("harm", "instant_damage"),
+            Map.entry("heal", "instant_health")
+    );
+
     private File dataFile;
     private FileConfiguration dataConfig;
+    private boolean dirty = false;
 
     private final List<PotionEffectType> positivePool = new ArrayList<>();
     private final List<PotionEffectType> negativePool = new ArrayList<>();
 
+    // Effects are stored by registry key (e.g. "strength"), never by deprecated legacy name.
     private final Map<UUID, Set<String>> permPositives = new HashMap<>();
     private final Map<UUID, Set<String>> permNegatives = new HashMap<>();
     private final Map<UUID, Map<String, Integer>> claimedKills = new HashMap<>();
@@ -44,133 +63,151 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
     public void onEnable() {
         saveDefaultConfig();
         loadConfigValues();
-
-        if (!setupEconomy()) {
-            getLogger().severe("Vault economy dependency not found! Disabling plugin.");
-            getServer().getPluginManager().disablePlugin(this);
-            return;
-        }
-
         loadDataFile();
+
         getServer().getPluginManager().registerEvents(this, this);
 
         Objects.requireNonNull(getCommand("buyeffect")).setExecutor(this);
         Objects.requireNonNull(getCommand("cureone")).setExecutor(this);
         Objects.requireNonNull(getCommand("cureall")).setExecutor(this);
-
         Objects.requireNonNull(getCommand("pvpeffects")).setExecutor(this);
         Objects.requireNonNull(getCommand("pvpeffects")).setTabCompleter(this);
 
-        getLogger().info("PvPEffects enabled with positive and negative effect limits!");
+        // Players already online (e.g. after /reload)
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            loadPlayerData(p.getUniqueId());
+            applyPermanentEffects(p);
+        }
+
+        // Batch disk writes instead of rewriting players.yml on every change
+        getServer().getScheduler().runTaskTimer(this, this::flushIfDirty, 600L, 600L);
+
+        getLogger().info("PvPEffects enabled.");
     }
 
     @Override
     public void onDisable() {
-        saveDataFile();
+        if (dataConfig == null || dataFile == null) return; // enable failed early
+
+        Set<UUID> all = new HashSet<>();
+        all.addAll(permPositives.keySet());
+        all.addAll(permNegatives.keySet());
+        all.addAll(claimedKills.keySet());
+        for (UUID uuid : all) syncPlayer(uuid);
+        writeFile();
+    }
+
+    // --- Effect lookup (registry based; getByName/getName are deprecated and break on legacy names) ---
+    private PotionEffectType lookupEffect(String raw) {
+        if (raw == null) return null;
+        String key = raw.trim().toLowerCase(Locale.ROOT);
+        key = LEGACY_NAMES.getOrDefault(key, key);
+        NamespacedKey nk = NamespacedKey.fromString(key);
+        return nk == null ? null : Registry.EFFECT.get(nk);
+    }
+
+    private String keyOf(PotionEffectType type) {
+        return type.key().value();
     }
 
     private void loadConfigValues() {
-        positivePool.clear();
-        negativePool.clear();
+        loadPool("positive-effects", positivePool);
+        loadPool("negative-effects", negativePool);
+    }
 
-        for (String effectName : getConfig().getStringList("positive-effects")) {
-            PotionEffectType type = PotionEffectType.getByName(effectName.toUpperCase());
-            if (type != null) {
-                positivePool.add(type);
-            } else {
-                getLogger().warning("Invalid positive effect in config.yml: " + effectName);
-            }
-        }
-
-        for (String effectName : getConfig().getStringList("negative-effects")) {
-            PotionEffectType type = PotionEffectType.getByName(effectName.toUpperCase());
-            if (type != null) {
-                negativePool.add(type);
-            } else {
-                getLogger().warning("Invalid negative effect in config.yml: " + effectName);
+    private void loadPool(String path, List<PotionEffectType> pool) {
+        pool.clear();
+        for (String name : getConfig().getStringList(path)) {
+            PotionEffectType type = lookupEffect(name);
+            if (type == null) {
+                getLogger().warning("Invalid effect '" + name + "' in " + path + " (config.yml)");
+            } else if (!pool.contains(type)) {
+                pool.add(type);
             }
         }
     }
 
-    private boolean setupEconomy() {
-        if (getServer().getPluginManager().getPlugin("Vault") == null) return false;
+    private Economy getEconomy() {
         RegisteredServiceProvider<Economy> rsp = getServer().getServicesManager().getRegistration(Economy.class);
-        if (rsp == null) return false;
-        econ = rsp.getProvider();
-        return econ != null;
+        return rsp == null ? null : rsp.getProvider();
     }
 
-    // --- Death & Respawn Listeners ---
+    // --- Listeners ---
     @EventHandler
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player victim = event.getEntity();
         Player killer = victim.getKiller();
 
-        if (killer != null && !killer.equals(victim)) {
-            UUID killerId = killer.getUniqueId();
-            String victimIdStr = victim.getUniqueId().toString();
-
-            Map<String, Integer> victimKillCounts = claimedKills.computeIfAbsent(killerId, k -> new HashMap<>());
-            int currentKills = victimKillCounts.getOrDefault(victimIdStr, 0);
-            int maxKills = getConfig().getInt("max-kills-per-victim", 1);
-
-            // Check if killer reached maximum allowed kill rewards for this victim
-            if (maxKills > 0 && currentKills >= maxKills) {
-                killer.sendMessage("§c[PvP] You have already reached the maximum limit (" + maxKills + ") for getting effects from " + victim.getName() + "!");
-                return;
-            }
-
-            // Increment kill count
-            victimKillCounts.put(victimIdStr, currentKills + 1);
-            savePlayerData(killerId);
-
-            // 1. Award positive effect to Killer (if under max-positive-effects limit)
-            int maxPosEffects = getConfig().getInt("max-positive-effects", 3);
-            Set<String> killerPositives = getPermSet(killer, permPositives);
-
-            if (maxPosEffects > 0 && killerPositives.size() >= maxPosEffects) {
-                killer.sendMessage("§e[PvP] You killed " + victim.getName() + ", but you already hold the maximum allowed positive effects (" + maxPosEffects + ")!");
-            } else {
-                PotionEffectType reward = getRandomUnownedEffect(killer, positivePool, killerPositives);
-                if (reward != null) {
-                    addPermEffect(killer, permPositives, reward);
-                    killer.sendMessage("§a[PvP] You killed " + victim.getName() + " (" + (currentKills + 1) + "/" + (maxKills > 0 ? maxKills : "∞") + ") and gained permanent " + formatName(reward) + "!");
-                }
-            }
-
-            // 2. Process Victim Penalty: Lose positive effect FIRST; if none, gain negative debuff
-            Set<String> victimPositives = getPermSet(victim, permPositives);
-
-            if (!victimPositives.isEmpty()) {
-                // Remove a random positive effect
-                List<String> posList = new ArrayList<>(victimPositives);
-                String lostEffectName = posList.get(random.nextInt(posList.size()));
-                victimPositives.remove(lostEffectName);
-
-                PotionEffectType lostType = PotionEffectType.getByName(lostEffectName);
-                if (lostType != null) {
-                    victim.removePotionEffect(lostType);
-                    victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and lost permanent " + formatName(lostType) + "!");
-                }
-                savePlayerData(victim.getUniqueId());
-            } else {
-                // Give negative effect if victim has no positive effects left (and under max-negative-effects limit)
-                int maxNegEffects = getConfig().getInt("max-negative-effects", 3);
-                Set<String> victimNegatives = getPermSet(victim, permNegatives);
-
-                if (maxNegEffects > 0 && victimNegatives.size() >= maxNegEffects) {
-                    victim.sendMessage("§e[PvP] You were slain by " + killer.getName() + ", but you already hold the maximum allowed negative effects (" + maxNegEffects + ")!");
-                } else {
-                    PotionEffectType penalty = getRandomUnownedEffect(victim, negativePool, victimNegatives);
-                    if (penalty != null) {
-                        addPermEffect(victim, permNegatives, penalty);
-                        victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
-                    }
-                }
-            }
-        } else {
+        if (killer == null || killer.equals(victim)) {
             pendingTempDebuff.add(victim.getUniqueId());
             victim.sendMessage("§e[PvP] You died of non-PvP causes. You will receive a temporary debuff on respawn.");
+            return;
+        }
+
+        rewardKiller(killer, victim);
+        penaliseVictim(killer, victim);
+    }
+
+    private void rewardKiller(Player killer, Player victim) {
+        UUID killerId = killer.getUniqueId();
+        String victimId = victim.getUniqueId().toString();
+
+        Map<String, Integer> counts = claimedKills.computeIfAbsent(killerId, k -> new HashMap<>());
+        int current = counts.getOrDefault(victimId, 0);
+        int maxKills = getConfig().getInt("max-kills-per-victim", 1);
+
+        if (maxKills > 0 && current >= maxKills) {
+            killer.sendMessage("§c[PvP] You have already reached the maximum limit (" + maxKills
+                    + ") for getting effects from " + victim.getName() + "!");
+            return;
+        }
+
+        int maxPos = getConfig().getInt("max-positive-effects", 3);
+        Set<String> positives = getPermSet(killerId, permPositives);
+        if (maxPos > 0 && positives.size() >= maxPos) {
+            killer.sendMessage("§e[PvP] You killed " + victim.getName()
+                    + ", but you already hold the maximum allowed positive effects (" + maxPos + ")!");
+            return;
+        }
+
+        PotionEffectType reward = getRandomUnownedEffect(positivePool, positives);
+        if (reward == null) return;
+
+        // Only consume a kill "slot" when a reward is actually granted
+        counts.put(victimId, current + 1);
+        addPermEffect(killer, permPositives, reward);
+        killer.sendMessage("§a[PvP] You killed " + victim.getName() + " (" + (current + 1) + "/"
+                + (maxKills > 0 ? String.valueOf(maxKills) : "∞") + ") and gained permanent " + formatName(reward) + "!");
+    }
+
+    private void penaliseVictim(Player killer, Player victim) {
+        UUID victimId = victim.getUniqueId();
+        Set<String> positives = getPermSet(victimId, permPositives);
+
+        if (!positives.isEmpty()) {
+            List<String> list = new ArrayList<>(positives);
+            String lost = list.get(random.nextInt(list.size()));
+            positives.remove(lost);
+            PotionEffectType lostType = lookupEffect(lost);
+            if (lostType != null) {
+                victim.removePotionEffect(lostType);
+                victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and lost permanent " + formatName(lostType) + "!");
+            }
+            savePlayerData(victimId);
+            return;
+        }
+
+        int maxNeg = getConfig().getInt("max-negative-effects", 3);
+        Set<String> negatives = getPermSet(victimId, permNegatives);
+        if (maxNeg > 0 && negatives.size() >= maxNeg) {
+            victim.sendMessage("§e[PvP] You were slain by " + killer.getName()
+                    + ", but you already hold the maximum allowed negative effects (" + maxNeg + ")!");
+            return;
+        }
+        PotionEffectType penalty = getRandomUnownedEffect(negativePool, negatives);
+        if (penalty != null) {
+            addPermEffect(victim, permNegatives, penalty);
+            victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
         }
     }
 
@@ -180,13 +217,14 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         UUID uuid = player.getUniqueId();
 
         Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (!player.isOnline()) return;
             applyPermanentEffects(player);
 
             if (pendingTempDebuff.remove(uuid) && !negativePool.isEmpty()) {
-                PotionEffectType tempEffect = negativePool.get(random.nextInt(negativePool.size()));
-                int durationTicks = getConfig().getInt("natural-death.duration-seconds", 300) * 20;
-                player.addPotionEffect(new PotionEffect(tempEffect, durationTicks, 0));
-                player.sendMessage("§c[PvP] Temporary penalty applied: " + formatName(tempEffect) + " for " + (durationTicks / 20) + " seconds.");
+                PotionEffectType temp = negativePool.get(random.nextInt(negativePool.size()));
+                int ticks = getConfig().getInt("natural-death.duration-seconds", 300) * 20;
+                player.addPotionEffect(new PotionEffect(temp, ticks, 0));
+                player.sendMessage("§c[PvP] Temporary penalty applied: " + formatName(temp) + " for " + (ticks / 20) + " seconds.");
             }
         }, 2L);
     }
@@ -197,10 +235,38 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         applyPermanentEffects(event.getPlayer());
     }
 
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        UUID uuid = event.getPlayer().getUniqueId();
+        syncPlayer(uuid);
+        flushIfDirty();
+        permPositives.remove(uuid);
+        permNegatives.remove(uuid);
+        claimedKills.remove(uuid);
+        pendingTempDebuff.remove(uuid);
+    }
+
+    /** Milk and Totem of Undying wipe every effect, including our infinite ones - put them back. */
+    @EventHandler(ignoreCancelled = true)
+    public void onPotionEffect(EntityPotionEffectEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+
+        EntityPotionEffectEvent.Cause cause = event.getCause();
+        if (cause != EntityPotionEffectEvent.Cause.MILK && cause != EntityPotionEffectEvent.Cause.TOTEM) return;
+
+        EntityPotionEffectEvent.Action action = event.getAction();
+        if (action != EntityPotionEffectEvent.Action.CLEARED && action != EntityPotionEffectEvent.Action.REMOVED) return;
+
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (player.isOnline() && !player.isDead()) applyPermanentEffects(player);
+        });
+    }
+
     // --- Commands ---
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (command.getName().equalsIgnoreCase("pvpeffects")) {
+        String name = command.getName().toLowerCase(Locale.ROOT);
+        if (name.equals("pvpeffects")) {
             return handleAdminCommand(sender, args);
         }
 
@@ -209,94 +275,99 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             return true;
         }
 
+        Economy econ = getEconomy();
+        if (econ == null) {
+            player.sendMessage("§cNo economy provider is available right now. Tell an administrator.");
+            return true;
+        }
+
         double balance = econ.getBalance(player);
+        UUID uuid = player.getUniqueId();
 
-        if (command.getName().equalsIgnoreCase("buyeffect")) {
-            int maxPosEffects = getConfig().getInt("max-positive-effects", 3);
-            Set<String> currentPositives = getPermSet(player, permPositives);
-
-            if (maxPosEffects > 0 && currentPositives.size() >= maxPosEffects) {
-                player.sendMessage("§cYou already have the maximum limit of " + maxPosEffects + " permanent positive effects!");
+        switch (name) {
+            case "buyeffect" -> {
+                int maxPos = getConfig().getInt("max-positive-effects", 3);
+                Set<String> positives = getPermSet(uuid, permPositives);
+                if (maxPos > 0 && positives.size() >= maxPos) {
+                    player.sendMessage("§cYou already have the maximum limit of " + maxPos + " permanent positive effects!");
+                    return true;
+                }
+                double cost = computeCost("buy-effect", balance, 20.0, 50000.0);
+                if (balance < cost) {
+                    player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto buy a permanent positive effect.");
+                    return true;
+                }
+                PotionEffectType effect = getRandomUnownedEffect(positivePool, positives);
+                if (effect == null) {
+                    player.sendMessage("§eYou already possess all available positive effects!");
+                    return true;
+                }
+                if (!charge(econ, player, cost)) return true;
+                addPermEffect(player, permPositives, effect);
+                player.sendMessage("§a[PvP] Purchased permanent " + formatName(effect) + " for $" + String.format("%.2f", cost) + "!");
                 return true;
             }
-
-            double pct = getConfig().getDouble("pricing.buy-effect.percentage", 20.0) / 100.0;
-            double minCost = getConfig().getDouble("pricing.buy-effect.min-cost", 50000.0);
-            double cost = Math.max(minCost, balance * pct);
-
-            if (balance < cost) {
-                player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto buy a permanent positive effect.");
-                return true;
-            }
-
-            PotionEffectType newEffect = getRandomUnownedEffect(player, positivePool, currentPositives);
-            if (newEffect == null) {
-                player.sendMessage("§eYou already possess all available positive effects!");
-                return true;
-            }
-
-            econ.withdrawPlayer(player, cost);
-            addPermEffect(player, permPositives, newEffect);
-            applyPermanentEffects(player);
-            player.sendMessage("§a[PvP] Purchased permanent " + formatName(newEffect) + " for $" + String.format("%.2f", cost) + "!");
-            return true;
-        }
-
-        if (command.getName().equalsIgnoreCase("cureone")) {
-            double pct = getConfig().getDouble("pricing.cure-one.percentage", 10.0) / 100.0;
-            double minCost = getConfig().getDouble("pricing.cure-one.min-cost", 25000.0);
-            double cost = Math.max(minCost, balance * pct);
-            Set<String> negs = getPermSet(player, permNegatives);
-
-            if (negs.isEmpty()) {
-                player.sendMessage("§aYou have no permanent negative effects to cure.");
-                return true;
-            }
-            if (balance < cost) {
-                player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto cure one negative effect.");
-                return true;
-            }
-
-            econ.withdrawPlayer(player, cost);
-            String removedName = negs.iterator().next();
-            negs.remove(removedName);
-
-            PotionEffectType type = PotionEffectType.getByName(removedName);
-            if (type != null) player.removePotionEffect(type);
-
-            savePlayerData(player.getUniqueId());
-            player.sendMessage("§a[PvP] Cured " + formatName(type) + " for $" + String.format("%.2f", cost) + "!");
-            return true;
-        }
-
-        if (command.getName().equalsIgnoreCase("cureall")) {
-            double pct = getConfig().getDouble("pricing.cure-all.percentage", 30.0) / 100.0;
-            double minCost = getConfig().getDouble("pricing.cure-all.min-cost", 75000.0);
-            double cost = Math.max(minCost, balance * pct);
-            Set<String> negs = getPermSet(player, permNegatives);
-
-            if (negs.isEmpty()) {
-                player.sendMessage("§aYou have no permanent negative effects to cure.");
-                return true;
-            }
-            if (balance < cost) {
-                player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto cure all negative effects.");
-                return true;
-            }
-
-            econ.withdrawPlayer(player, cost);
-            for (String effectName : new HashSet<>(negs)) {
-                PotionEffectType type = PotionEffectType.getByName(effectName);
+            case "cureone" -> {
+                Set<String> negatives = getPermSet(uuid, permNegatives);
+                if (negatives.isEmpty()) {
+                    player.sendMessage("§aYou have no permanent negative effects to cure.");
+                    return true;
+                }
+                double cost = computeCost("cure-one", balance, 10.0, 25000.0);
+                if (balance < cost) {
+                    player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto cure one negative effect.");
+                    return true;
+                }
+                if (!charge(econ, player, cost)) return true;
+                String removed = negatives.iterator().next();
+                negatives.remove(removed);
+                PotionEffectType type = lookupEffect(removed);
                 if (type != null) player.removePotionEffect(type);
+                savePlayerData(uuid);
+                player.sendMessage("§a[PvP] Cured " + formatName(type) + " for $" + String.format("%.2f", cost) + "!");
+                return true;
             }
-            negs.clear();
-
-            savePlayerData(player.getUniqueId());
-            player.sendMessage("§a[PvP] Cleared all permanent debuffs for $" + String.format("%.2f", cost) + "!");
-            return true;
+            case "cureall" -> {
+                Set<String> negatives = getPermSet(uuid, permNegatives);
+                if (negatives.isEmpty()) {
+                    player.sendMessage("§aYou have no permanent negative effects to cure.");
+                    return true;
+                }
+                double cost = computeCost("cure-all", balance, 30.0, 75000.0);
+                if (balance < cost) {
+                    player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto cure all negative effects.");
+                    return true;
+                }
+                if (!charge(econ, player, cost)) return true;
+                for (String effectName : new HashSet<>(negatives)) {
+                    PotionEffectType type = lookupEffect(effectName);
+                    if (type != null) player.removePotionEffect(type);
+                }
+                negatives.clear();
+                savePlayerData(uuid);
+                player.sendMessage("§a[PvP] Cleared all permanent debuffs for $" + String.format("%.2f", cost) + "!");
+                return true;
+            }
+            default -> {
+                return false;
+            }
         }
+    }
 
-        return false;
+    private double computeCost(String section, double balance, double defPct, double defMin) {
+        double pct = getConfig().getDouble("pricing." + section + ".percentage", defPct) / 100.0;
+        double min = getConfig().getDouble("pricing." + section + ".min-cost", defMin);
+        return Math.max(min, balance * pct);
+    }
+
+    /** Withdraws and verifies the transaction actually succeeded. */
+    private boolean charge(Economy econ, Player player, double cost) {
+        EconomyResponse response = econ.withdrawPlayer(player, cost);
+        if (!response.transactionSuccess()) {
+            player.sendMessage("§cPayment failed: " + response.errorMessage);
+            return false;
+        }
+        return true;
     }
 
     // --- Admin Commands ---
@@ -315,7 +386,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             return true;
         }
 
-        String sub = args[0].toLowerCase();
+        String sub = args[0].toLowerCase(Locale.ROOT);
 
         if (sub.equals("reload")) {
             reloadConfig();
@@ -329,28 +400,19 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 sender.sendMessage("§cUsage: /pvpeffects reset <player>");
                 return true;
             }
-            Player target = Bukkit.getPlayer(args[1]);
+            Player target = Bukkit.getPlayerExact(args[1]);
             if (target == null) {
-                sender.sendMessage("§cPlayer not found.");
+                sender.sendMessage("§cPlayer not found (must be online).");
                 return true;
             }
 
             UUID uuid = target.getUniqueId();
-            Set<String> pos = permPositives.getOrDefault(uuid, Collections.emptySet());
-            Set<String> neg = permNegatives.getOrDefault(uuid, Collections.emptySet());
+            for (String eff : permPositives.getOrDefault(uuid, Collections.emptySet())) removeEffectByKey(target, eff);
+            for (String eff : permNegatives.getOrDefault(uuid, Collections.emptySet())) removeEffectByKey(target, eff);
 
-            for (String eff : pos) {
-                PotionEffectType type = PotionEffectType.getByName(eff);
-                if (type != null) target.removePotionEffect(type);
-            }
-            for (String eff : neg) {
-                PotionEffectType type = PotionEffectType.getByName(eff);
-                if (type != null) target.removePotionEffect(type);
-            }
-
-            permPositives.remove(uuid);
-            permNegatives.remove(uuid);
-            claimedKills.remove(uuid);
+            permPositives.put(uuid, new HashSet<>());
+            permNegatives.put(uuid, new HashSet<>());
+            claimedKills.put(uuid, new HashMap<>());
             savePlayerData(uuid);
 
             sender.sendMessage("§a[PvP] Reset all permanent effects and kill count history for " + target.getName() + ".");
@@ -363,44 +425,42 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 sender.sendMessage("§cUsage: /pvpeffects " + sub + " <player> <positive|negative> <effect>");
                 return true;
             }
-
-            Player target = Bukkit.getPlayer(args[1]);
+            Player target = Bukkit.getPlayerExact(args[1]);
             if (target == null) {
-                sender.sendMessage("§cPlayer not found.");
+                sender.sendMessage("§cPlayer not found (must be online).");
                 return true;
             }
 
-            String typeCategory = args[2].toLowerCase();
-            PotionEffectType effectType = PotionEffectType.getByName(args[3].toUpperCase());
-
+            PotionEffectType effectType = lookupEffect(args[3]);
             if (effectType == null) {
                 sender.sendMessage("§cInvalid effect type: " + args[3]);
                 return true;
             }
 
+            String category = args[2].toLowerCase(Locale.ROOT);
             Map<UUID, Set<String>> targetMap;
-            if (typeCategory.equals("positive")) {
-                targetMap = permPositives;
-            } else if (typeCategory.equals("negative")) {
-                targetMap = permNegatives;
-            } else {
+            if (category.equals("positive")) targetMap = permPositives;
+            else if (category.equals("negative")) targetMap = permNegatives;
+            else {
                 sender.sendMessage("§cEffect category must be either 'positive' or 'negative'.");
                 return true;
             }
 
             UUID uuid = target.getUniqueId();
-            Set<String> effectSet = targetMap.computeIfAbsent(uuid, k -> new HashSet<>());
+            Set<String> set = getPermSet(uuid, targetMap);
 
             if (sub.equals("add")) {
-                effectSet.add(effectType.getName());
+                set.add(keyOf(effectType));
                 applyPermanentEffects(target);
                 sender.sendMessage("§a[PvP] Added permanent " + formatName(effectType) + " to " + target.getName() + ".");
             } else {
-                effectSet.remove(effectType.getName());
+                if (!set.remove(keyOf(effectType))) {
+                    sender.sendMessage("§e[PvP] " + target.getName() + " does not have permanent " + formatName(effectType) + ".");
+                    return true;
+                }
                 target.removePotionEffect(effectType);
                 sender.sendMessage("§a[PvP] Removed permanent " + formatName(effectType) + " from " + target.getName() + ".");
             }
-
             savePlayerData(uuid);
             return true;
         }
@@ -416,75 +476,84 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             return Collections.emptyList();
         }
 
+        String sub = args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "";
+        boolean addRemove = sub.equals("add") || sub.equals("remove");
+
         if (args.length == 1) {
-            return Arrays.asList("reload", "add", "remove", "reset").stream()
-                    .filter(s -> s.startsWith(args[0].toLowerCase()))
-                    .collect(Collectors.toList());
+            return Stream4.of("reload", "add", "remove", "reset", args[0]);
         }
-
-        if (args.length == 2 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove") || args[0].equalsIgnoreCase("reset"))) {
-            return null;
+        if (args.length == 2 && (addRemove || sub.equals("reset"))) {
+            return null; // default: online player names
         }
-
-        if (args.length == 3 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove"))) {
-            return Arrays.asList("positive", "negative").stream()
-                    .filter(s -> s.startsWith(args[2].toLowerCase()))
-                    .collect(Collectors.toList());
+        if (args.length == 3 && addRemove) {
+            return Stream4.of("positive", "negative", args[2]);
         }
-
-        if (args.length == 4 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove"))) {
-            List<PotionEffectType> source = args[2].equalsIgnoreCase("positive") ? positivePool : negativePool;
-            return source.stream()
-                    .map(PotionEffectType::getName)
-                    .filter(s -> s.startsWith(args[3].toUpperCase()))
-                    .collect(Collectors.toList());
+        if (args.length == 4 && addRemove) {
+            String prefix = args[3].toLowerCase(Locale.ROOT);
+            List<String> names;
+            Player target = Bukkit.getPlayerExact(args[1]);
+            if (sub.equals("remove") && target != null) {
+                Map<UUID, Set<String>> map = args[2].equalsIgnoreCase("positive") ? permPositives : permNegatives;
+                names = new ArrayList<>(map.getOrDefault(target.getUniqueId(), Collections.emptySet()));
+            } else {
+                List<PotionEffectType> source = args[2].equalsIgnoreCase("positive") ? positivePool : negativePool;
+                names = source.stream().map(this::keyOf).collect(Collectors.toList());
+            }
+            return names.stream().filter(s -> s.startsWith(prefix)).collect(Collectors.toList());
         }
-
         return Collections.emptyList();
     }
 
-    // --- Helper Methods ---
-    private Set<String> getPermSet(Player player, Map<UUID, Set<String>> map) {
-        return map.computeIfAbsent(player.getUniqueId(), k -> new HashSet<>());
+    /** Tiny prefix-filter helper for tab completion. */
+    private static final class Stream4 {
+        static List<String> of(String... valuesThenPrefix) {
+            String prefix = valuesThenPrefix[valuesThenPrefix.length - 1].toLowerCase(Locale.ROOT);
+            List<String> out = new ArrayList<>();
+            for (int i = 0; i < valuesThenPrefix.length - 1; i++) {
+                if (valuesThenPrefix[i].startsWith(prefix)) out.add(valuesThenPrefix[i]);
+            }
+            return out;
+        }
+    }
+
+    // --- Helpers ---
+    private Set<String> getPermSet(UUID uuid, Map<UUID, Set<String>> map) {
+        return map.computeIfAbsent(uuid, k -> new HashSet<>());
     }
 
     private void addPermEffect(Player player, Map<UUID, Set<String>> map, PotionEffectType type) {
-        getPermSet(player, map).add(type.getName());
+        getPermSet(player.getUniqueId(), map).add(keyOf(type));
         savePlayerData(player.getUniqueId());
         applyPermanentEffects(player);
     }
 
-    private PotionEffectType getRandomUnownedEffect(Player player, List<PotionEffectType> pool, Set<String> current) {
+    private PotionEffectType getRandomUnownedEffect(List<PotionEffectType> pool, Set<String> current) {
         List<PotionEffectType> unowned = new ArrayList<>();
         for (PotionEffectType type : pool) {
-            if (!current.contains(type.getName())) {
-                unowned.add(type);
-            }
+            if (!current.contains(keyOf(type))) unowned.add(type);
         }
-        if (unowned.isEmpty()) return null;
-        return unowned.get(random.nextInt(unowned.size()));
+        return unowned.isEmpty() ? null : unowned.get(random.nextInt(unowned.size()));
+    }
+
+    private void removeEffectByKey(Player player, String key) {
+        PotionEffectType type = lookupEffect(key);
+        if (type != null) player.removePotionEffect(type);
     }
 
     private void applyPermanentEffects(Player player) {
         UUID uuid = player.getUniqueId();
-        Set<String> pos = permPositives.getOrDefault(uuid, Collections.emptySet());
-        Set<String> neg = permNegatives.getOrDefault(uuid, Collections.emptySet());
+        for (String name : permPositives.getOrDefault(uuid, Collections.emptySet())) applyInfinite(player, name);
+        for (String name : permNegatives.getOrDefault(uuid, Collections.emptySet())) applyInfinite(player, name);
+    }
 
-        for (String name : pos) {
-            PotionEffectType type = PotionEffectType.getByName(name);
-            if (type != null) {
-                player.addPotionEffect(new PotionEffect(type, PotionEffect.INFINITE_DURATION, 0, false, false));
-            }
-        }
-        for (String name : neg) {
-            PotionEffectType type = PotionEffectType.getByName(name);
-            if (type != null) {
-                player.addPotionEffect(new PotionEffect(type, PotionEffect.INFINITE_DURATION, 0, false, false));
-            }
+    private void applyInfinite(Player player, String name) {
+        PotionEffectType type = lookupEffect(name);
+        if (type != null) {
+            player.addPotionEffect(new PotionEffect(type, PotionEffect.INFINITE_DURATION, 0, false, false));
         }
     }
 
-    // --- Persistence Management ---
+    // --- Persistence ---
     private void loadDataFile() {
         dataFile = new File(getDataFolder(), "players.yml");
         if (!dataFile.exists()) {
@@ -492,70 +561,66 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             try {
                 dataFile.createNewFile();
             } catch (IOException e) {
-                getLogger().severe("Could not create players.yml!");
+                getLogger().severe("Could not create players.yml: " + e.getMessage());
             }
         }
         dataConfig = YamlConfiguration.loadConfiguration(dataFile);
     }
 
-    private void loadPlayerData(UUID uuid) {
-        List<String> pos = dataConfig.getStringList(uuid + ".positives");
-        List<String> neg = dataConfig.getStringList(uuid + ".negatives");
-
-        permPositives.put(uuid, new HashSet<>(pos));
-        permNegatives.put(uuid, new HashSet<>(neg));
-
-        Map<String, Integer> killsMap = new HashMap<>();
-        ConfigurationSection sec = dataConfig.getConfigurationSection(uuid + ".claimed-kills");
-        if (sec != null) {
-            for (String victimKey : sec.getKeys(false)) {
-                killsMap.put(victimKey, sec.getInt(victimKey));
-            }
+    private Set<String> normalise(List<String> raw) {
+        Set<String> out = new HashSet<>();
+        for (String s : raw) {
+            PotionEffectType type = lookupEffect(s);
+            if (type != null) out.add(keyOf(type));
+            else getLogger().warning("Dropping unknown effect '" + s + "' from players.yml");
         }
-        claimedKills.put(uuid, killsMap);
+        return out;
     }
 
-    private void savePlayerData(UUID uuid) {
+    private void loadPlayerData(UUID uuid) {
+        permPositives.put(uuid, normalise(dataConfig.getStringList(uuid + ".positives")));
+        permNegatives.put(uuid, normalise(dataConfig.getStringList(uuid + ".negatives")));
+
+        Map<String, Integer> kills = new HashMap<>();
+        ConfigurationSection sec = dataConfig.getConfigurationSection(uuid + ".claimed-kills");
+        if (sec != null) {
+            for (String victimKey : sec.getKeys(false)) kills.put(victimKey, sec.getInt(victimKey));
+        }
+        claimedKills.put(uuid, kills);
+    }
+
+    /** Copies one player's in-memory state into the YAML tree and marks it for writing. */
+    private void syncPlayer(UUID uuid) {
         dataConfig.set(uuid + ".positives", new ArrayList<>(permPositives.getOrDefault(uuid, Collections.emptySet())));
         dataConfig.set(uuid + ".negatives", new ArrayList<>(permNegatives.getOrDefault(uuid, Collections.emptySet())));
 
         dataConfig.set(uuid + ".claimed-kills", null);
-        Map<String, Integer> killsMap = claimedKills.getOrDefault(uuid, Collections.emptyMap());
-        for (Map.Entry<String, Integer> entry : killsMap.entrySet()) {
-            dataConfig.set(uuid + ".claimed-kills." + entry.getKey(), entry.getValue());
+        for (Map.Entry<String, Integer> e : claimedKills.getOrDefault(uuid, Collections.emptyMap()).entrySet()) {
+            dataConfig.set(uuid + ".claimed-kills." + e.getKey(), e.getValue());
         }
-
-        try {
-            dataConfig.save(dataFile);
-        } catch (IOException e) {
-            getLogger().severe("Could not save player data to players.yml!");
-        }
+        dirty = true;
     }
 
-    private void saveDataFile() {
-        for (UUID uuid : permPositives.keySet()) {
-            dataConfig.set(uuid + ".positives", new ArrayList<>(permPositives.get(uuid)));
-        }
-        for (UUID uuid : permNegatives.keySet()) {
-            dataConfig.set(uuid + ".negatives", new ArrayList<>(permNegatives.get(uuid)));
-        }
-        for (UUID uuid : claimedKills.keySet()) {
-            Map<String, Integer> killsMap = claimedKills.get(uuid);
-            dataConfig.set(uuid + ".claimed-kills", null);
-            for (Map.Entry<String, Integer> entry : killsMap.entrySet()) {
-                dataConfig.set(uuid + ".claimed-kills." + entry.getKey(), entry.getValue());
-            }
-        }
+    private void savePlayerData(UUID uuid) {
+        syncPlayer(uuid); // actual disk write happens in flushIfDirty()
+    }
+
+    private void flushIfDirty() {
+        if (dirty) writeFile();
+    }
+
+    private void writeFile() {
         try {
             dataConfig.save(dataFile);
+            dirty = false;
         } catch (IOException e) {
-            getLogger().severe("Could not save players.yml!");
+            getLogger().severe("Could not save players.yml: " + e.getMessage());
         }
     }
 
     private String formatName(PotionEffectType type) {
         if (type == null) return "Unknown";
-        String name = type.getKey().getKey().replace('_', ' ');
-        return name.substring(0, 1).toUpperCase() + name.substring(1);
+        String name = keyOf(type).replace('_', ' ');
+        return name.substring(0, 1).toUpperCase(Locale.ROOT) + name.substring(1);
     }
 }
