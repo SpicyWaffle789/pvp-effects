@@ -19,13 +19,13 @@ repositories {
 }
 
 dependencies {
-    compileOnly 'io.papermc.paper:paper-api:1.20.6-R0.1-SNAPSHOT'
+    compileOnly 'io.papermc.paper:paper-api:26.3-R0.1-SNAPSHOT'
     compileOnly 'com.github.MilkBowl:VaultAPI:1.7'
 }
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(17)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -48,6 +48,6 @@ modrinth {
     versionNumber = project.version
     versionName = "PvPEffects v${project.version}"
     uploadFile = jar
-    gameVersions = ["1.20.1", "1.20.4", "1.20.6"]
+    gameVersions = ["26.3"]
     loaders = ["paper", "spigot", "purpur"]
 }
