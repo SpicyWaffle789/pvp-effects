@@ -1,0 +1,40 @@
+# ====================================================== #
+#               PvPEffects Configuration                 #
+# ====================================================== #
+
+# Pool of positive effects given on PvP kill or bought via /buyeffect
+positive-effects:
+  - SPEED
+  - REGENERATION
+  - STRENGTH
+  - HASTE
+  - RESISTANCE
+  - FIRE_RESISTANCE
+  - SATURATION
+
+# Pool of negative effects given on PvP death or cured via /cureone / /cureall
+negative-effects:
+  - SLOWNESS
+  - WEAKNESS
+  - MINING_FATIGUE
+  - BLINDNESS
+  - HUNGER
+  - NAUSEA
+
+# Settings for non-PvP (natural/environmental) deaths
+natural-death:
+  # Duration of the temporary negative debuff in seconds (300 = 5 minutes)
+  duration-seconds: 300
+
+# Economy and Pricing Formulas
+# Formula applied: Max(min-cost, player_balance * (percentage / 100))
+pricing:
+  buy-effect:
+    percentage: 20.0
+    min-cost: 50000.0
+  cure-one:
+    percentage: 10.0
+    min-cost: 25000.0
+  cure-all:
+    percentage: 30.0
+    min-cost: 75000.0
