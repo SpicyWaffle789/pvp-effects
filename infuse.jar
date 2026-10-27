@@ -1,0 +1,115 @@
+package com.example.pvpeffects;
+
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+
+import java.util.*;
+
+public final class PvpEffectsPlugin extends JavaPlugin implements Listener {
+
+    // Pool of positive effects to award or check
+    private static final List<PotionEffectType> POSITIVE_EFFECTS = Arrays.asList(
+            PotionEffectType.SPEED,
+            PotionEffectType.REGENERATION,
+            PotionEffectType.STRENGTH,
+            PotionEffectType.HASTE,
+            PotionEffectType.RESISTANCE,
+            PotionEffectType.FIRE_RESISTANCE,
+            PotionEffectType.ABSORPTION
+    );
+
+    // Pool of negative effects applied when a victim dies with no positive effects
+    private static final List<PotionEffectType> NEGATIVE_EFFECTS = Arrays.asList(
+            PotionEffectType.SLOWNESS,
+            PotionEffectType.WEAKNESS,
+            PotionEffectType.BLINDNESS,
+            PotionEffectType.WITHER,
+            PotionEffectType.POISON,
+            PotionEffectType.HUNGER
+    );
+
+    // Stores active effects to restore or debuffs to apply on respawn
+    private final Map<UUID, List<PotionEffect>> respawnEffectsToRestore = new HashMap<>();
+    private final Set<UUID> pendingDebuff = new HashSet<>();
+    private final Random random = new Random();
+
+    @Override
+    public void onEnable() {
+        getServer().getPluginManager().registerEvents(this, this);
+        getLogger().info("PvPEffects has been enabled!");
+    }
+
+    @EventHandler
+    public void onPlayerDeath(PlayerDeathEvent event) {
+        Player victim = event.getEntity();
+        Player killer = victim.getKiller();
+
+        // Only trigger if the victim was killed by another player
+        if (killer == null || killer.equals(victim)) {
+            return;
+        }
+
+        // 1. Reward the killer with a random positive effect (Duration: 60 seconds)
+        PotionEffectType killerReward = POSITIVE_EFFECTS.get(random.nextInt(POSITIVE_EFFECTS.size()));
+        killer.addPotionEffect(new PotionEffect(killerReward, 20 * 60, 0));
+        killer.sendMessage("§a[PvP] You killed " + victim.getName() + " and received " + formatEffectName(killerReward) + "!");
+
+        // 2. Identify victim's current positive effects before death clears them
+        List<PotionEffect> activePositives = new ArrayList<>();
+        for (PotionEffect effect : victim.getActivePotionEffects()) {
+            if (POSITIVE_EFFECTS.contains(effect.getType())) {
+                activePositives.add(effect);
+            }
+        }
+
+        if (!activePositives.isEmpty()) {
+            // Remove exactly 1 positive effect at random
+            int removeIndex = random.nextInt(activePositives.size());
+            PotionEffect removedEffect = activePositives.remove(removeIndex);
+
+            // Queue the remaining positive effects to restore when the player respawns
+            if (!activePositives.isEmpty()) {
+                respawnEffectsToRestore.put(victim.getUniqueId(), activePositives);
+            }
+            victim.sendMessage("§e[PvP] You were slain! Your " + formatEffectName(removedEffect.getType()) + " effect was removed.");
+        } else {
+            // Queue a negative effect on respawn if they had 0 positive effects
+            pendingDebuff.add(victim.getUniqueId());
+            victim.sendMessage("§c[PvP] You had no positive effects active! You will receive a debuff upon respawning.");
+        }
+    }
+
+    @EventHandler
+    public void onPlayerRespawn(PlayerRespawnEvent event) {
+        Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
+
+        // Run 1 tick after respawn to ensure potion effects apply correctly
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            if (respawnEffectsToRestore.containsKey(uuid)) {
+                List<PotionEffect> toRestore = respawnEffectsToRestore.remove(uuid);
+                for (PotionEffect effect : toRestore) {
+                    player.addPotionEffect(effect);
+                }
+                player.sendMessage("§a[PvP] Your remaining positive effects have been restored.");
+            } else if (pendingDebuff.contains(uuid)) {
+                pendingDebuff.remove(uuid);
+                PotionEffectType debuffType = NEGATIVE_EFFECTS.get(random.nextInt(NEGATIVE_EFFECTS.size()));
+                player.addPotionEffect(new PotionEffect(debuffType, 20 * 30, 0)); // Duration: 30 seconds
+                player.sendMessage("§c[PvP] You respawned with " + formatEffectName(debuffType) + "!");
+            }
+        }, 1L);
+    }
+
+    private String formatEffectName(PotionEffectType type) {
+        String name = type.getKey().getKey().replace('_', ' ');
+        return name.substring(0, 1).toUpperCase() + name.substring(1);
+    }
+}
