@@ -19,6 +19,7 @@ target/
 run/
 plugins/
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.log
 
 # OS Metadata
