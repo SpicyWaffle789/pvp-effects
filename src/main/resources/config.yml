@@ -1,40 +1,42 @@
-# ====================================================== #
-#               PvPEffects Configuration                 #
-# ====================================================== #
+# ==========================================
+#             PvPEffects Config             
+# ==========================================
 
-# Pool of positive effects given on PvP kill or bought via /buyeffect
+# Maximum times a player can earn effects from killing the same victim.
+# Set to 1 for unique kills only, or higher (e.g. 3) to allow multiple rewards per victim.
+# Set to 0 for unlimited kills per victim.
+max-kills-per-victim: 1
+
+# Pool of positive permanent effects awarded on unique player kills or bought via /buyeffect
 positive-effects:
-  - SPEED
-  - REGENERATION
-  - STRENGTH
-  - HASTE
-  - RESISTANCE
-  - FIRE_RESISTANCE
-  - SATURATION
+  - "SPEED"
+  - "INCREASE_DAMAGE"
+  - "REGENERATION"
+  - "FAST_DIGGING"
+  - "DAMAGE_RESISTANCE"
+  - "FIRE_RESISTANCE"
+  - "NIGHT_VISION"
 
-# Pool of negative effects given on PvP death or cured via /cureone / /cureall
+# Pool of negative permanent effects applied on PvP death or temporarily on non-PvP death
 negative-effects:
-  - SLOWNESS
-  - WEAKNESS
-  - MINING_FATIGUE
-  - BLINDNESS
-  - HUNGER
-  - NAUSEA
+  - "SLOW"
+  - "WEAKNESS"
+  - "POISON"
+  - "SLOW_DIGGING"
+  - "BLINDNESS"
 
-# Settings for non-PvP (natural/environmental) deaths
+# Settings for deaths caused by environment, mobs, or suicide
 natural-death:
-  # Duration of the temporary negative debuff in seconds (300 = 5 minutes)
-  duration-seconds: 300
+  duration-seconds: 300 # Duration in seconds for temporary debuffs upon respawn
 
-# Economy and Pricing Formulas
-# Formula applied: Max(min-cost, player_balance * (percentage / 100))
+# Economy settings (Requires Vault and an economy plugin like EssentialsX)
 pricing:
   buy-effect:
-    percentage: 20.0
-    min-cost: 50000.0
+    percentage: 20.0    # Takes 20% of player's balance
+    min-cost: 50000.0   # Minimum cost floor
   cure-one:
-    percentage: 10.0
-    min-cost: 25000.0
+    percentage: 10.0    # Takes 10% of player's balance
+    min-cost: 25000.0   # Minimum cost floor
   cure-all:
-    percentage: 30.0
-    min-cost: 75000.0
+    percentage: 30.0    # Takes 30% of player's balance
+    min-cost: 75000.0   # Minimum cost floor
