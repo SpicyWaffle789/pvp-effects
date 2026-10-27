@@ -6,6 +6,10 @@
 # Default is 3. Set to 0 for unlimited positive effects.
 max-positive-effects: 3
 
+# Maximum number of permanent negative effects a player can hold simultaneously.
+# Default is 3. Set to 0 for unlimited negative effects.
+max-negative-effects: 3
+
 # Maximum times a player can earn effects from killing the same victim.
 # Set to 1 for unique kills only. Set to 0 for unlimited kills per victim.
 max-kills-per-victim: 1
