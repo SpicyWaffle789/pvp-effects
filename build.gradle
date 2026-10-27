@@ -11,18 +11,26 @@ repositories {
         name = 'papermc'
         url = 'https://repo.papermc.io/repository/maven-public/'
     }
-    maven {
-        name = 'jitpack'
-        url = 'https://jitpack.io'
+    // Only fetch Vault from JitPack so it can't shadow other artifacts
+    exclusiveContent {
+        forRepository {
+            maven { url = 'https://jitpack.io' }
+        }
+        filter {
+            includeGroup 'com.github.MilkBowl'
+        }
     }
 }
 
 dependencies {
-    // Corrected Paper 26.3 API dependency format
+    // 26.3 is currently on Paper's alpha/beta channel. A "+" version floats; pin an exact build
+    // (e.g. '26.3.build.143-beta') for reproducible builds.
     compileOnly 'io.papermc.paper:paper-api:26.3.build.+'
 
-    // Vault API
-    compileOnly 'com.github.MilkBowl:VaultAPI:1.7.1'
+    // VaultAPI drags in an ancient bukkit 1.13 dependency; we only need the Economy classes.
+    compileOnly('com.github.MilkBowl:VaultAPI:1.7.1') {
+        transitive = false
+    }
 }
 
 java {
@@ -33,4 +41,5 @@ java {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+    options.release = 25
 }
