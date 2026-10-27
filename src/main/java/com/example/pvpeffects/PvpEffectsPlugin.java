@@ -36,7 +36,6 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
     private final Map<UUID, Set<String>> permPositives = new HashMap<>();
     private final Map<UUID, Set<String>> permNegatives = new HashMap<>();
-    // Tracks Killer UUID -> (Victim UUID String -> Kill Count)
     private final Map<UUID, Map<String, Integer>> claimedKills = new HashMap<>();
     private final Set<UUID> pendingTempDebuff = new HashSet<>();
     private final Random random = new Random();
@@ -62,7 +61,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Objects.requireNonNull(getCommand("pvpeffects")).setExecutor(this);
         Objects.requireNonNull(getCommand("pvpeffects")).setTabCompleter(this);
 
-        getLogger().info("PvPEffects v2.1 enabled with configurable kill limits!");
+        getLogger().info("PvPEffects enabled with positive-loss penalty logic!");
     }
 
     @Override
@@ -115,26 +114,45 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             int currentKills = victimKillCounts.getOrDefault(victimIdStr, 0);
             int maxKills = getConfig().getInt("max-kills-per-victim", 1);
 
-            // Check if killer has reached the maximum allowed kill rewards for this victim (0 = unlimited)
+            // Check if killer reached maximum allowed kill rewards for this victim
             if (maxKills > 0 && currentKills >= maxKills) {
                 killer.sendMessage("§c[PvP] You have already reached the maximum limit (" + maxKills + ") for getting effects from " + victim.getName() + "!");
                 return;
             }
 
-            // Increment kill count and save
+            // Increment kill count
             victimKillCounts.put(victimIdStr, currentKills + 1);
             savePlayerData(killerId);
 
+            // 1. Award positive effect to Killer
             PotionEffectType reward = getRandomUnownedEffect(killer, positivePool, getPermSet(killer, permPositives));
             if (reward != null) {
                 addPermEffect(killer, permPositives, reward);
                 killer.sendMessage("§a[PvP] You killed " + victim.getName() + " (" + (currentKills + 1) + "/" + (maxKills > 0 ? maxKills : "∞") + ") and gained permanent " + formatName(reward) + "!");
             }
 
-            PotionEffectType penalty = getRandomUnownedEffect(victim, negativePool, getPermSet(victim, permNegatives));
-            if (penalty != null) {
-                addPermEffect(victim, permNegatives, penalty);
-                victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
+            // 2. Process Victim Penalty: Lose positive effect FIRST; if none, gain negative debuff
+            Set<String> victimPositives = getPermSet(victim, permPositives);
+
+            if (!victimPositives.isEmpty()) {
+                // Remove a random positive effect
+                List<String> posList = new ArrayList<>(victimPositives);
+                String lostEffectName = posList.get(random.nextInt(posList.size()));
+                victimPositives.remove(lostEffectName);
+
+                PotionEffectType lostType = PotionEffectType.getByName(lostEffectName);
+                if (lostType != null) {
+                    victim.removePotionEffect(lostType);
+                    victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and lost permanent " + formatName(lostType) + "!");
+                }
+                savePlayerData(victim.getUniqueId());
+            } else {
+                // Give negative effect if victim has no positive effects left
+                PotionEffectType penalty = getRandomUnownedEffect(victim, negativePool, getPermSet(victim, permNegatives));
+                if (penalty != null) {
+                    addPermEffect(victim, permNegatives, penalty);
+                    victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
+                }
             }
         } else {
             pendingTempDebuff.add(victim.getUniqueId());
@@ -383,7 +401,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         }
 
         if (args.length == 2 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove") || args[0].equalsIgnoreCase("reset"))) {
-            return null; // Triggers player name suggestions
+            return null;
         }
 
         if (args.length == 3 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove"))) {
@@ -465,7 +483,6 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         permPositives.put(uuid, new HashSet<>(pos));
         permNegatives.put(uuid, new HashSet<>(neg));
 
-        // Load kill counts map for killer
         Map<String, Integer> killsMap = new HashMap<>();
         ConfigurationSection sec = dataConfig.getConfigurationSection(uuid + ".claimed-kills");
         if (sec != null) {
@@ -480,8 +497,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         dataConfig.set(uuid + ".positives", new ArrayList<>(permPositives.getOrDefault(uuid, Collections.emptySet())));
         dataConfig.set(uuid + ".negatives", new ArrayList<>(permNegatives.getOrDefault(uuid, Collections.emptySet())));
 
-        // Save kill counts map for killer
-        dataConfig.set(uuid + ".claimed-kills", null); // Clear existing section
+        dataConfig.set(uuid + ".claimed-kills", null);
         Map<String, Integer> killsMap = claimedKills.getOrDefault(uuid, Collections.emptyMap());
         for (Map.Entry<String, Integer> entry : killsMap.entrySet()) {
             dataConfig.set(uuid + ".claimed-kills." + entry.getKey(), entry.getValue());
