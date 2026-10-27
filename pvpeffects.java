@@ -5,6 +5,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
@@ -21,8 +22,9 @@ import org.bukkit.potion.PotionEffectType;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.stream.Collectors;
 
-public final class PvpEffectsPlugin extends JavaPlugin implements Listener, CommandExecutor {
+public final class PvpEffectsPlugin extends JavaPlugin implements Listener, CommandExecutor, TabCompleter {
 
     private Economy econ = null;
     private File dataFile;
@@ -31,7 +33,6 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
     private final List<PotionEffectType> positivePool = new ArrayList<>();
     private final List<PotionEffectType> negativePool = new ArrayList<>();
 
-    // Dynamic state trackers
     private final Map<UUID, Set<String>> permPositives = new HashMap<>();
     private final Map<UUID, Set<String>> permNegatives = new HashMap<>();
     private final Set<UUID> pendingTempDebuff = new HashSet<>();
@@ -39,7 +40,6 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
     @Override
     public void onEnable() {
-        // Save default config.yml if it doesn't exist
         saveDefaultConfig();
         loadConfigValues();
 
@@ -56,7 +56,10 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Objects.requireNonNull(getCommand("cureone")).setExecutor(this);
         Objects.requireNonNull(getCommand("cureall")).setExecutor(this);
 
-        getLogger().info("PvPEffects v2.0 enabled with config support!");
+        Objects.requireNonNull(getCommand("pvpeffects")).setExecutor(this);
+        Objects.requireNonNull(getCommand("pvpeffects")).setTabCompleter(this);
+
+        getLogger().info("PvPEffects v2.1 enabled with Admin commands!");
     }
 
     @Override
@@ -102,7 +105,6 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Player killer = victim.getKiller();
 
         if (killer != null && !killer.equals(victim)) {
-            // Player vs Player Death
             PotionEffectType reward = getRandomUnownedEffect(killer, positivePool, getPermSet(killer, permPositives));
             if (reward != null) {
                 addPermEffect(killer, permPositives, reward);
@@ -115,7 +117,6 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
             }
         } else {
-            // Natural / Environmental Death
             pendingTempDebuff.add(victim.getUniqueId());
             victim.sendMessage("§e[PvP] You died of non-PvP causes. You will receive a temporary debuff on respawn.");
         }
@@ -147,6 +148,10 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
     // --- Commands ---
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (command.getName().equalsIgnoreCase("pvpeffects")) {
+            return handleAdminCommand(sender, args);
+        }
+
         if (!(sender instanceof Player player)) {
             sender.sendMessage("Only players can execute this command.");
             return true;
@@ -232,6 +237,149 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         }
 
         return false;
+    }
+
+    // --- Admin Commands ---
+    private boolean handleAdminCommand(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("pvpeffects.admin")) {
+            sender.sendMessage("§cYou do not have permission to execute this command.");
+            return true;
+        }
+
+        if (args.length == 0) {
+            sender.sendMessage("§e--- PvPEffects Admin Commands ---");
+            sender.sendMessage("§e/pvpeffects reload §7- Reload configuration");
+            sender.sendMessage("§e/pvpeffects add <player> <positive|negative> <effect> §7- Add permanent effect");
+            sender.sendMessage("§e/pvpeffects remove <player> <positive|negative> <effect> §7- Remove permanent effect");
+            sender.sendMessage("§e/pvpeffects reset <player> §7- Reset all permanent effects for player");
+            return true;
+        }
+
+        String sub = args[0].toLowerCase();
+
+        if (sub.equals("reload")) {
+            reloadConfig();
+            loadConfigValues();
+            sender.sendMessage("§a[PvP] Configuration reloaded successfully.");
+            return true;
+        }
+
+        if (sub.equals("reset")) {
+            if (args.length < 2) {
+                sender.sendMessage("§cUsage: /pvpeffects reset <player>");
+                return true;
+            }
+            Player target = Bukkit.getPlayer(args[1]);
+            if (target == null) {
+                sender.sendMessage("§cPlayer not found.");
+                return true;
+            }
+
+            UUID uuid = target.getUniqueId();
+            Set<String> pos = permPositives.getOrDefault(uuid, Collections.emptySet());
+            Set<String> neg = permNegatives.getOrDefault(uuid, Collections.emptySet());
+
+            for (String eff : pos) {
+                PotionEffectType type = PotionEffectType.getByName(eff);
+                if (type != null) target.removePotionEffect(type);
+            }
+            for (String eff : neg) {
+                PotionEffectType type = PotionEffectType.getByName(eff);
+                if (type != null) target.removePotionEffect(type);
+            }
+
+            permPositives.remove(uuid);
+            permNegatives.remove(uuid);
+            savePlayerData(uuid);
+
+            sender.sendMessage("§a[PvP] Reset all permanent effects for " + target.getName() + ".");
+            target.sendMessage("§e[PvP] Your permanent effects were reset by an administrator.");
+            return true;
+        }
+
+        if (sub.equals("add") || sub.equals("remove")) {
+            if (args.length < 4) {
+                sender.sendMessage("§cUsage: /pvpeffects " + sub + " <player> <positive|negative> <effect>");
+                return true;
+            }
+
+            Player target = Bukkit.getPlayer(args[1]);
+            if (target == null) {
+                sender.sendMessage("§cPlayer not found.");
+                return true;
+            }
+
+            String typeCategory = args[2].toLowerCase();
+            PotionEffectType effectType = PotionEffectType.getByName(args[3].toUpperCase());
+
+            if (effectType == null) {
+                sender.sendMessage("§cInvalid effect type: " + args[3]);
+                return true;
+            }
+
+            Map<UUID, Set<String>> targetMap;
+            if (typeCategory.equals("positive")) {
+                targetMap = permPositives;
+            } else if (typeCategory.equals("negative")) {
+                targetMap = permNegatives;
+            } else {
+                sender.sendMessage("§cEffect category must be either 'positive' or 'negative'.");
+                return true;
+            }
+
+            UUID uuid = target.getUniqueId();
+            Set<String> effectSet = targetMap.computeIfAbsent(uuid, k -> new HashSet<>());
+
+            if (sub.equals("add")) {
+                effectSet.add(effectType.getName());
+                applyPermanentEffects(target);
+                sender.sendMessage("§a[PvP] Added permanent " + formatName(effectType) + " to " + target.getName() + ".");
+            } else {
+                effectSet.remove(effectType.getName());
+                target.removePotionEffect(effectType);
+                sender.sendMessage("§a[PvP] Removed permanent " + formatName(effectType) + " from " + target.getName() + ".");
+            }
+
+            savePlayerData(uuid);
+            return true;
+        }
+
+        sender.sendMessage("§cUnknown subcommand. Type /pvpeffects for help.");
+        return true;
+    }
+
+    // --- Tab Completer ---
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (!command.getName().equalsIgnoreCase("pvpeffects") || !sender.hasPermission("pvpeffects.admin")) {
+            return Collections.emptyList();
+        }
+
+        if (args.length == 1) {
+            return Arrays.asList("reload", "add", "remove", "reset").stream()
+                    .filter(s -> s.startsWith(args[0].toLowerCase()))
+                    .collect(Collectors.toList());
+        }
+
+        if (args.length == 2 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove") || args[0].equalsIgnoreCase("reset"))) {
+            return null; // Triggers player name suggestions
+        }
+
+        if (args.length == 3 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove"))) {
+            return Arrays.asList("positive", "negative").stream()
+                    .filter(s -> s.startsWith(args[2].toLowerCase()))
+                    .collect(Collectors.toList());
+        }
+
+        if (args.length == 4 && (args[0].equalsIgnoreCase("add") || args[0].equalsIgnoreCase("remove"))) {
+            List<PotionEffectType> source = args[2].equalsIgnoreCase("positive") ? positivePool : negativePool;
+            return source.stream()
+                    .map(PotionEffectType::getName)
+                    .filter(s -> s.startsWith(args[3].toUpperCase()))
+                    .collect(Collectors.toList());
+        }
+
+        return Collections.emptyList();
     }
 
     // --- Helper Methods ---
