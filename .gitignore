@@ -1,0 +1,26 @@
+# Build and IDE outputs
+.gradle/
+build/
+bin/
+out/
+target/
+
+# IDE Project Files
+.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+.vscode/
+
+# Server runtime directories
+run/
+plugins/
+*.jar
+*.log
+
+# OS Metadata
+.DS_Store
+Thumbs.db
