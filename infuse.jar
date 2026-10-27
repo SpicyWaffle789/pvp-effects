@@ -1,88 +1,113 @@
 package com.example.pvpeffects;
 
+import net.milkbowl.vault.economy.Economy;
 import org.bukkit.Bukkit;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
 
-public final class PvpEffectsPlugin extends JavaPlugin implements Listener {
+public final class PvpEffectsPlugin extends JavaPlugin implements Listener, CommandExecutor {
 
-    // Pool of positive effects to award or check
-    private static final List<PotionEffectType> POSITIVE_EFFECTS = Arrays.asList(
+    private Economy econ = null;
+    private File dataFile;
+    private FileConfiguration dataConfig;
+
+    private final List<PotionEffectType> POSITIVE_POOL = Arrays.asList(
             PotionEffectType.SPEED,
             PotionEffectType.REGENERATION,
             PotionEffectType.STRENGTH,
             PotionEffectType.HASTE,
             PotionEffectType.RESISTANCE,
             PotionEffectType.FIRE_RESISTANCE,
-            PotionEffectType.ABSORPTION
+            PotionEffectType.SATURATION
     );
 
-    // Pool of negative effects applied when a victim dies with no positive effects
-    private static final List<PotionEffectType> NEGATIVE_EFFECTS = Arrays.asList(
+    private final List<PotionEffectType> NEGATIVE_POOL = Arrays.asList(
             PotionEffectType.SLOWNESS,
             PotionEffectType.WEAKNESS,
+            PotionEffectType.MINING_FATIGUE,
             PotionEffectType.BLINDNESS,
-            PotionEffectType.WITHER,
-            PotionEffectType.POISON,
-            PotionEffectType.HUNGER
+            PotionEffectType.HUNGER,
+            PotionEffectType.NAUSEA
     );
 
-    // Stores active effects to restore or debuffs to apply on respawn
-    private final Map<UUID, List<PotionEffect>> respawnEffectsToRestore = new HashMap<>();
-    private final Set<UUID> pendingDebuff = new HashSet<>();
+    // Dynamic state trackers
+    private final Map<UUID, Set<String>> permPositives = new HashMap<>();
+    private final Map<UUID, Set<String>> permNegatives = new HashMap<>();
+    private final Set<UUID> pendingTempDebuff = new HashSet<>();
     private final Random random = new Random();
 
     @Override
     public void onEnable() {
+        if (!setupEconomy()) {
+            getLogger().severe("Vault economy dependency not found! Disabling plugin.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+
+        loadDataFile();
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("PvPEffects has been enabled!");
+
+        Objects.requireNonNull(getCommand("buyeffect")).setExecutor(this);
+        Objects.requireNonNull(getCommand("cureone")).setExecutor(this);
+        Objects.requireNonNull(getCommand("cureall")).setExecutor(this);
+
+        getLogger().info("PvPEffects v2.0 enabled successfully!");
     }
 
+    @Override
+    public void onDisable() {
+        saveDataFile();
+    }
+
+    // --- Vault Integration ---
+    private boolean setupEconomy() {
+        if (getServer().getPluginManager().getPlugin("Vault") == null) return false;
+        RegisteredServiceProvider<Economy> rsp = getServer().getServicesManager().getRegistration(Economy.class);
+        if (rsp == null) return false;
+        econ = rsp.getProvider();
+        return econ != null;
+    }
+
+    // --- Death & Respawn Listeners ---
     @EventHandler
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player victim = event.getEntity();
         Player killer = victim.getKiller();
 
-        // Only trigger if the victim was killed by another player
-        if (killer == null || killer.equals(victim)) {
-            return;
-        }
-
-        // 1. Reward the killer with a random positive effect (Duration: 60 seconds)
-        PotionEffectType killerReward = POSITIVE_EFFECTS.get(random.nextInt(POSITIVE_EFFECTS.size()));
-        killer.addPotionEffect(new PotionEffect(killerReward, 20 * 60, 0));
-        killer.sendMessage("§a[PvP] You killed " + victim.getName() + " and received " + formatEffectName(killerReward) + "!");
-
-        // 2. Identify victim's current positive effects before death clears them
-        List<PotionEffect> activePositives = new ArrayList<>();
-        for (PotionEffect effect : victim.getActivePotionEffects()) {
-            if (POSITIVE_EFFECTS.contains(effect.getType())) {
-                activePositives.add(effect);
+        if (killer != null && !killer.equals(victim)) {
+            // Player vs Player Death
+            PotionEffectType reward = getRandomUnownedEffect(killer, POSITIVE_POOL, getPermSet(killer, permPositives));
+            if (reward != null) {
+                addPermEffect(killer, permPositives, reward);
+                killer.sendMessage("§a[PvP] You killed " + victim.getName() + " and gained permanent " + formatName(reward) + "!");
             }
-        }
 
-        if (!activePositives.isEmpty()) {
-            // Remove exactly 1 positive effect at random
-            int removeIndex = random.nextInt(activePositives.size());
-            PotionEffect removedEffect = activePositives.remove(removeIndex);
-
-            // Queue the remaining positive effects to restore when the player respawns
-            if (!activePositives.isEmpty()) {
-                respawnEffectsToRestore.put(victim.getUniqueId(), activePositives);
+            PotionEffectType penalty = getRandomUnownedEffect(victim, NEGATIVE_POOL, getPermSet(victim, permNegatives));
+            if (penalty != null) {
+                addPermEffect(victim, permNegatives, penalty);
+                victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
             }
-            victim.sendMessage("§e[PvP] You were slain! Your " + formatEffectName(removedEffect.getType()) + " effect was removed.");
         } else {
-            // Queue a negative effect on respawn if they had 0 positive effects
-            pendingDebuff.add(victim.getUniqueId());
-            victim.sendMessage("§c[PvP] You had no positive effects active! You will receive a debuff upon respawning.");
+            // Natural / Environmental Death
+            pendingTempDebuff.add(victim.getUniqueId());
+            victim.sendMessage("§e[PvP] You died of non-PvP causes. You will receive a temporary debuff on respawn.");
         }
     }
 
@@ -91,25 +116,85 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
 
-        // Run 1 tick after respawn to ensure potion effects apply correctly
         Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (respawnEffectsToRestore.containsKey(uuid)) {
-                List<PotionEffect> toRestore = respawnEffectsToRestore.remove(uuid);
-                for (PotionEffect effect : toRestore) {
-                    player.addPotionEffect(effect);
-                }
-                player.sendMessage("§a[PvP] Your remaining positive effects have been restored.");
-            } else if (pendingDebuff.contains(uuid)) {
-                pendingDebuff.remove(uuid);
-                PotionEffectType debuffType = NEGATIVE_EFFECTS.get(random.nextInt(NEGATIVE_EFFECTS.size()));
-                player.addPotionEffect(new PotionEffect(debuffType, 20 * 30, 0)); // Duration: 30 seconds
-                player.sendMessage("§c[PvP] You respawned with " + formatEffectName(debuffType) + "!");
+            applyPermanentEffects(player);
+
+            if (pendingTempDebuff.remove(uuid)) {
+                PotionEffectType tempEffect = NEGATIVE_POOL.get(random.nextInt(NEGATIVE_POOL.size()));
+                player.addPotionEffect(new PotionEffect(tempEffect, 20 * 300, 0)); // 5 minutes
+                player.sendMessage("§c[PvP] Temporary penalty applied: " + formatName(tempEffect) + " for 5 minutes.");
             }
-        }, 1L);
+        }, 2L);
     }
 
-    private String formatEffectName(PotionEffectType type) {
-        String name = type.getKey().getKey().replace('_', ' ');
-        return name.substring(0, 1).toUpperCase() + name.substring(1);
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        loadPlayerData(event.getPlayer().getUniqueId());
+        applyPermanentEffects(event.getPlayer());
     }
-}
+
+    // --- Commands ---
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("Only players can execute this command.");
+            return true;
+        }
+
+        double balance = econ.getBalance(player);
+
+        if (command.getName().equalsIgnoreCase("buyeffect")) {
+            double cost = Math.max(50000.0, balance * 0.20);
+            if (balance < cost) {
+                player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto buy a permanent positive effect.");
+                return true;
+            }
+
+            PotionEffectType newEffect = getRandomUnownedEffect(player, POSITIVE_POOL, getPermSet(player, permPositives));
+            if (newEffect == null) {
+                player.sendMessage("§eYou already possess all available positive effects!");
+                return true;
+            }
+
+            econ.withdrawPlayer(player, cost);
+            addPermEffect(player, permPositives, newEffect);
+            applyPermanentEffects(player);
+            player.sendMessage("§a[PvP] Purchased permanent " + formatName(newEffect) + " for $" + String.format("%.2f", cost) + "!");
+            return true;
+        }
+
+        if (command.getName().equalsIgnoreCase("cureone")) {
+            double cost = Math.max(25000.0, balance * 0.10);
+            Set<String> negs = getPermSet(player, permNegatives);
+
+            if (negs.isEmpty()) {
+                player.sendMessage("§aYou have no permanent negative effects to cure.");
+                return true;
+            }
+            if (balance < cost) {
+                player.sendMessage("§cYou need §e$" + String.format("%.2f", cost) + " §cto cure one negative effect.");
+                return true;
+            }
+
+            econ.withdrawPlayer(player, cost);
+            String removedName = negs.iterator().next();
+            negs.remove(removedName);
+
+            PotionEffectType type = PotionEffectType.getByName(removedName);
+            if (type != null) player.removePotionEffect(type);
+
+            savePlayerData(player.getUniqueId());
+            player.sendMessage("§a[PvP] Cured " + formatName(type) + " for $" + String.format("%.2f", cost) + "!");
+            return true;
+        }
+
+        if (command.getName().equalsIgnoreCase("cureall")) {
+            double cost = Math.max(75000.0, balance * 0.30);
+            Set<String> negs = getPermSet(player, permNegatives);
+
+            if (negs.isEmpty()) {
+                player.sendMessage("§aYou have no permanent negative effects to cure.");
+                return true;
+            }
+            if (balance < cost) {
+                player.sendMessage("§
