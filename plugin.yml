@@ -1,19 +1,32 @@
 name: PvPEffects
-version: 2.0.0
+version: 2.1.0
 main: com.example.pvpeffects.PvpEffectsPlugin
 api-version: '26.3'
 depend: [Vault]
-author: SpicyWaffle789
+author: Developer
 description: Grants permanent effects on PvP kills/deaths, temporary debuffs on natural death, and Vault-integrated cure commands.
+
+permissions:
+  pvpeffects.use:
+    description: Allows player access to economy commands.
+    default: true
+  pvpeffects.admin:
+    description: Allows administrative control over player effects and plugin config.
+    default: op
 
 commands:
   buyeffect:
-    description: Buy a permanent positive effect (Costs 20% balance, min 50,000).
+    description: Buy a permanent positive effect.
     aliases: [buygood]
     permission: pvpeffects.use
   cureone:
-    description: Cure one permanent negative effect (Costs 10% balance, min 25,000).
+    description: Cure one permanent negative effect.
     permission: pvpeffects.use
   cureall:
-    description: Cure all permanent negative effects (Costs 30% balance, min 75,000).
+    description: Cure all permanent negative effects.
     permission: pvpeffects.use
+  pvpeffects:
+    description: Administrative commands for managing PvP effects.
+    aliases: [pvpadmin, peadmin]
+    permission: pvpeffects.admin
+    usage: /pvpeffects <reload|add|remove|reset> [player] [positive|negative] [effect]
