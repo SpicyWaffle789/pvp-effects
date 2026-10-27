@@ -6,6 +6,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
@@ -35,7 +36,8 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
     private final Map<UUID, Set<String>> permPositives = new HashMap<>();
     private final Map<UUID, Set<String>> permNegatives = new HashMap<>();
-    private final Map<UUID, Set<String>> claimedKills = new HashMap<>();
+    // Tracks Killer UUID -> (Victim UUID String -> Kill Count)
+    private final Map<UUID, Map<String, Integer>> claimedKills = new HashMap<>();
     private final Set<UUID> pendingTempDebuff = new HashSet<>();
     private final Random random = new Random();
 
@@ -60,7 +62,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Objects.requireNonNull(getCommand("pvpeffects")).setExecutor(this);
         Objects.requireNonNull(getCommand("pvpeffects")).setTabCompleter(this);
 
-        getLogger().info("PvPEffects v2.1 enabled with Admin commands & Unique Kill rules!");
+        getLogger().info("PvPEffects v2.1 enabled with configurable kill limits!");
     }
 
     @Override
@@ -108,22 +110,25 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         if (killer != null && !killer.equals(victim)) {
             UUID killerId = killer.getUniqueId();
             String victimIdStr = victim.getUniqueId().toString();
-            Set<String> killerClaimed = claimedKills.computeIfAbsent(killerId, k -> new HashSet<>());
 
-            // Check if killer has already earned an effect for killing this specific victim
-            if (killerClaimed.contains(victimIdStr)) {
-                killer.sendMessage("§c[PvP] You have already earned a status effect for killing " + victim.getName() + "!");
+            Map<String, Integer> victimKillCounts = claimedKills.computeIfAbsent(killerId, k -> new HashMap<>());
+            int currentKills = victimKillCounts.getOrDefault(victimIdStr, 0);
+            int maxKills = getConfig().getInt("max-kills-per-victim", 1);
+
+            // Check if killer has reached the maximum allowed kill rewards for this victim (0 = unlimited)
+            if (maxKills > 0 && currentKills >= maxKills) {
+                killer.sendMessage("§c[PvP] You have already reached the maximum limit (" + maxKills + ") for getting effects from " + victim.getName() + "!");
                 return;
             }
 
-            // Record unique kill and save persistence data
-            killerClaimed.add(victimIdStr);
+            // Increment kill count and save
+            victimKillCounts.put(victimIdStr, currentKills + 1);
             savePlayerData(killerId);
 
             PotionEffectType reward = getRandomUnownedEffect(killer, positivePool, getPermSet(killer, permPositives));
             if (reward != null) {
                 addPermEffect(killer, permPositives, reward);
-                killer.sendMessage("§a[PvP] You killed " + victim.getName() + " for the first time and gained permanent " + formatName(reward) + "!");
+                killer.sendMessage("§a[PvP] You killed " + victim.getName() + " (" + (currentKills + 1) + "/" + (maxKills > 0 ? maxKills : "∞") + ") and gained permanent " + formatName(reward) + "!");
             }
 
             PotionEffectType penalty = getRandomUnownedEffect(victim, negativePool, getPermSet(victim, permNegatives));
@@ -266,7 +271,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             sender.sendMessage("§e/pvpeffects reload §7- Reload configuration");
             sender.sendMessage("§e/pvpeffects add <player> <positive|negative> <effect> §7- Add permanent effect");
             sender.sendMessage("§e/pvpeffects remove <player> <positive|negative> <effect> §7- Remove permanent effect");
-            sender.sendMessage("§e/pvpeffects reset <player> §7- Reset permanent effects & unique kill history");
+            sender.sendMessage("§e/pvpeffects reset <player> §7- Reset permanent effects & kill counts");
             return true;
         }
 
@@ -308,7 +313,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             claimedKills.remove(uuid);
             savePlayerData(uuid);
 
-            sender.sendMessage("§a[PvP] Reset all permanent effects and kill history for " + target.getName() + ".");
+            sender.sendMessage("§a[PvP] Reset all permanent effects and kill count history for " + target.getName() + ".");
             target.sendMessage("§e[PvP] Your permanent effects and unique kill history were reset by an administrator.");
             return true;
         }
@@ -456,17 +461,32 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
     private void loadPlayerData(UUID uuid) {
         List<String> pos = dataConfig.getStringList(uuid + ".positives");
         List<String> neg = dataConfig.getStringList(uuid + ".negatives");
-        List<String> kills = dataConfig.getStringList(uuid + ".claimed-kills");
 
         permPositives.put(uuid, new HashSet<>(pos));
         permNegatives.put(uuid, new HashSet<>(neg));
-        claimedKills.put(uuid, new HashSet<>(kills));
+
+        // Load kill counts map for killer
+        Map<String, Integer> killsMap = new HashMap<>();
+        ConfigurationSection sec = dataConfig.getConfigurationSection(uuid + ".claimed-kills");
+        if (sec != null) {
+            for (String victimKey : sec.getKeys(false)) {
+                killsMap.put(victimKey, sec.getInt(victimKey));
+            }
+        }
+        claimedKills.put(uuid, killsMap);
     }
 
     private void savePlayerData(UUID uuid) {
         dataConfig.set(uuid + ".positives", new ArrayList<>(permPositives.getOrDefault(uuid, Collections.emptySet())));
         dataConfig.set(uuid + ".negatives", new ArrayList<>(permNegatives.getOrDefault(uuid, Collections.emptySet())));
-        dataConfig.set(uuid + ".claimed-kills", new ArrayList<>(claimedKills.getOrDefault(uuid, Collections.emptySet())));
+
+        // Save kill counts map for killer
+        dataConfig.set(uuid + ".claimed-kills", null); // Clear existing section
+        Map<String, Integer> killsMap = claimedKills.getOrDefault(uuid, Collections.emptyMap());
+        for (Map.Entry<String, Integer> entry : killsMap.entrySet()) {
+            dataConfig.set(uuid + ".claimed-kills." + entry.getKey(), entry.getValue());
+        }
+
         try {
             dataConfig.save(dataFile);
         } catch (IOException e) {
@@ -482,7 +502,11 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             dataConfig.set(uuid + ".negatives", new ArrayList<>(permNegatives.get(uuid)));
         }
         for (UUID uuid : claimedKills.keySet()) {
-            dataConfig.set(uuid + ".claimed-kills", new ArrayList<>(claimedKills.get(uuid)));
+            Map<String, Integer> killsMap = claimedKills.get(uuid);
+            dataConfig.set(uuid + ".claimed-kills", null);
+            for (Map.Entry<String, Integer> entry : killsMap.entrySet()) {
+                dataConfig.set(uuid + ".claimed-kills." + entry.getKey(), entry.getValue());
+            }
         }
         try {
             dataConfig.save(dataFile);
