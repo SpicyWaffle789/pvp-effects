@@ -1,0 +1,19 @@
+name: PvPEffects
+version: 2.0.0
+main: com.example.pvpeffects.PvpEffectsPlugin
+api-version: '26.3'
+depend: [Vault]
+author: SpicyWaffle789
+description: Grants permanent effects on PvP kills/deaths, temporary debuffs on natural death, and Vault-integrated cure commands.
+
+commands:
+  buyeffect:
+    description: Buy a permanent positive effect (Costs 20% balance, min 50,000).
+    aliases: [buygood]
+    permission: pvpeffects.use
+  cureone:
+    description: Cure one permanent negative effect (Costs 10% balance, min 25,000).
+    permission: pvpeffects.use
+  cureall:
+    description: Cure all permanent negative effects (Costs 30% balance, min 75,000).
+    permission: pvpeffects.use
