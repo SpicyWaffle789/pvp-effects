@@ -61,7 +61,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Objects.requireNonNull(getCommand("pvpeffects")).setExecutor(this);
         Objects.requireNonNull(getCommand("pvpeffects")).setTabCompleter(this);
 
-        getLogger().info("PvPEffects enabled with positive-loss penalty logic!");
+        getLogger().info("PvPEffects enabled with maximum effect limits!");
     }
 
     @Override
@@ -124,11 +124,18 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             victimKillCounts.put(victimIdStr, currentKills + 1);
             savePlayerData(killerId);
 
-            // 1. Award positive effect to Killer
-            PotionEffectType reward = getRandomUnownedEffect(killer, positivePool, getPermSet(killer, permPositives));
-            if (reward != null) {
-                addPermEffect(killer, permPositives, reward);
-                killer.sendMessage("§a[PvP] You killed " + victim.getName() + " (" + (currentKills + 1) + "/" + (maxKills > 0 ? maxKills : "∞") + ") and gained permanent " + formatName(reward) + "!");
+            // 1. Award positive effect to Killer (if under max-positive-effects limit)
+            int maxPosEffects = getConfig().getInt("max-positive-effects", 3);
+            Set<String> killerPositives = getPermSet(killer, permPositives);
+
+            if (maxPosEffects > 0 && killerPositives.size() >= maxPosEffects) {
+                killer.sendMessage("§e[PvP] You killed " + victim.getName() + ", but you already hold the maximum allowed positive effects (" + maxPosEffects + ")!");
+            } else {
+                PotionEffectType reward = getRandomUnownedEffect(killer, positivePool, killerPositives);
+                if (reward != null) {
+                    addPermEffect(killer, permPositives, reward);
+                    killer.sendMessage("§a[PvP] You killed " + victim.getName() + " (" + (currentKills + 1) + "/" + (maxKills > 0 ? maxKills : "∞") + ") and gained permanent " + formatName(reward) + "!");
+                }
             }
 
             // 2. Process Victim Penalty: Lose positive effect FIRST; if none, gain negative debuff
@@ -198,6 +205,14 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         double balance = econ.getBalance(player);
 
         if (command.getName().equalsIgnoreCase("buyeffect")) {
+            int maxPosEffects = getConfig().getInt("max-positive-effects", 3);
+            Set<String> currentPositives = getPermSet(player, permPositives);
+
+            if (maxPosEffects > 0 && currentPositives.size() >= maxPosEffects) {
+                player.sendMessage("§cYou already have the maximum limit of " + maxPosEffects + " permanent positive effects!");
+                return true;
+            }
+
             double pct = getConfig().getDouble("pricing.buy-effect.percentage", 20.0) / 100.0;
             double minCost = getConfig().getDouble("pricing.buy-effect.min-cost", 50000.0);
             double cost = Math.max(minCost, balance * pct);
@@ -207,7 +222,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 return true;
             }
 
-            PotionEffectType newEffect = getRandomUnownedEffect(player, positivePool, getPermSet(player, permPositives));
+            PotionEffectType newEffect = getRandomUnownedEffect(player, positivePool, currentPositives);
             if (newEffect == null) {
                 player.sendMessage("§eYou already possess all available positive effects!");
                 return true;
