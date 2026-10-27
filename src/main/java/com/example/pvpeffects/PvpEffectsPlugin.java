@@ -61,7 +61,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Objects.requireNonNull(getCommand("pvpeffects")).setExecutor(this);
         Objects.requireNonNull(getCommand("pvpeffects")).setTabCompleter(this);
 
-        getLogger().info("PvPEffects enabled with maximum effect limits!");
+        getLogger().info("PvPEffects enabled with positive and negative effect limits!");
     }
 
     @Override
@@ -154,11 +154,18 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 }
                 savePlayerData(victim.getUniqueId());
             } else {
-                // Give negative effect if victim has no positive effects left
-                PotionEffectType penalty = getRandomUnownedEffect(victim, negativePool, getPermSet(victim, permNegatives));
-                if (penalty != null) {
-                    addPermEffect(victim, permNegatives, penalty);
-                    victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
+                // Give negative effect if victim has no positive effects left (and under max-negative-effects limit)
+                int maxNegEffects = getConfig().getInt("max-negative-effects", 3);
+                Set<String> victimNegatives = getPermSet(victim, permNegatives);
+
+                if (maxNegEffects > 0 && victimNegatives.size() >= maxNegEffects) {
+                    victim.sendMessage("§e[PvP] You were slain by " + killer.getName() + ", but you already hold the maximum allowed negative effects (" + maxNegEffects + ")!");
+                } else {
+                    PotionEffectType penalty = getRandomUnownedEffect(victim, negativePool, victimNegatives);
+                    if (penalty != null) {
+                        addPermEffect(victim, permNegatives, penalty);
+                        victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
+                    }
                 }
             }
         } else {
