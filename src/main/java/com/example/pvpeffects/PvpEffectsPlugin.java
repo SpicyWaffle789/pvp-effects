@@ -127,6 +127,13 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         }
     }
 
+    // Cap semantics: 0 = category disabled, -1 (or any negative) = unlimited, N > 0 = at most N.
+    private int maxPositive() { return getConfig().getInt("max-positive-effects", 3); }
+    private int maxNegative() { return getConfig().getInt("max-negative-effects", 3); }
+    private boolean positivesEnabled() { return maxPositive() != 0; }
+    private boolean negativesEnabled() { return maxNegative() != 0; }
+    private boolean isFull(int max, int size) { return max > 0 && size >= max; }
+
     private Economy getEconomy() {
         RegisteredServiceProvider<Economy> rsp = getServer().getServicesManager().getRegistration(Economy.class);
         return rsp == null ? null : rsp.getProvider();
@@ -139,6 +146,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         Player killer = victim.getKiller();
 
         if (killer == null || killer.equals(victim)) {
+            if (!negativesEnabled()) return; // negative effects are disabled
             pendingTempDebuff.add(victim.getUniqueId());
             savePlayerData(victim.getUniqueId()); // persisted, so quitting on the death screen can't dodge it
             victim.sendMessage("§e[PvP] You died of non-PvP causes. You will receive a temporary debuff on respawn.");
@@ -163,9 +171,10 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
 
-        int maxPos = getConfig().getInt("max-positive-effects", 3);
+        if (!positivesEnabled()) return; // positive effects are disabled
+        int maxPos = maxPositive();
         Set<String> positives = getPermSet(killerId, permPositives);
-        if (maxPos > 0 && positives.size() >= maxPos) {
+        if (isFull(maxPos, positives.size())) {
             killer.sendMessage("§e[PvP] You killed " + victim.getName()
                     + ", but you already hold the maximum allowed positive effects (" + maxPos + ")!");
             return;
@@ -189,7 +198,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         UUID victimId = victim.getUniqueId();
         Set<String> positives = getPermSet(victimId, permPositives);
 
-        if (!positives.isEmpty()) {
+        if (positivesEnabled() && !positives.isEmpty()) {
             List<String> list = new ArrayList<>(positives);
             String lost = list.get(random.nextInt(list.size()));
             positives.remove(lost);
@@ -203,9 +212,10 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             return;
         }
 
-        int maxNeg = getConfig().getInt("max-negative-effects", 3);
+        if (!negativesEnabled()) return; // negative effects are disabled
+        int maxNeg = maxNegative();
         Set<String> negatives = getPermSet(victimId, permNegatives);
-        if (maxNeg > 0 && negatives.size() >= maxNeg) {
+        if (isFull(maxNeg, negatives.size())) {
             victim.sendMessage("§e[PvP] You were slain by " + killer.getName()
                     + ", but you already hold the maximum allowed negative effects (" + maxNeg + ")!");
             return;
@@ -231,7 +241,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
             boolean owed = pendingTempDebuff.remove(uuid);
             if (owed) savePlayerData(uuid);
-            if (owed && !negativePool.isEmpty()) {
+            if (owed && negativesEnabled() && !negativePool.isEmpty()) {
                 PotionEffectType temp = negativePool.get(random.nextInt(negativePool.size()));
                 int ticks = getConfig().getInt("natural-death.duration-seconds", 300) * 20;
                 player.addPotionEffect(new PotionEffect(temp, ticks, 0));
@@ -297,9 +307,13 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
         switch (name) {
             case "buyeffect" -> {
-                int maxPos = getConfig().getInt("max-positive-effects", 3);
+                if (!positivesEnabled()) {
+                    player.sendMessage("§cPositive effects are disabled on this server.");
+                    return true;
+                }
+                int maxPos = maxPositive();
                 Set<String> positives = getPermSet(uuid, permPositives);
-                if (maxPos > 0 && positives.size() >= maxPos) {
+                if (isFull(maxPos, positives.size())) {
                     player.sendMessage("§cYou already have the maximum limit of " + maxPos + " permanent positive effects!");
                     return true;
                 }
@@ -319,6 +333,10 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 return true;
             }
             case "cureone" -> {
+                if (!negativesEnabled()) {
+                    player.sendMessage("§cNegative effects are disabled on this server.");
+                    return true;
+                }
                 Set<String> negatives = getPermSet(uuid, permNegatives);
                 if (negatives.isEmpty()) {
                     player.sendMessage("§aYou have no permanent negative effects to cure.");
@@ -339,6 +357,10 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
                 return true;
             }
             case "cureall" -> {
+                if (!negativesEnabled()) {
+                    player.sendMessage("§cNegative effects are disabled on this server.");
+                    return true;
+                }
                 Set<String> negatives = getPermSet(uuid, permNegatives);
                 if (negatives.isEmpty()) {
                     player.sendMessage("§aYou have no permanent negative effects to cure.");
@@ -402,6 +424,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         if (sub.equals("reload")) {
             reloadConfig();
             loadConfigValues();
+            for (Player online : Bukkit.getOnlinePlayers()) applyPermanentEffects(online);
             sender.sendMessage("§a[PvP] Configuration reloaded successfully.");
             return true;
         }
@@ -461,6 +484,11 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             Set<String> set = getPermSet(uuid, targetMap);
 
             if (sub.equals("add")) {
+                boolean enabled = category.equals("positive") ? positivesEnabled() : negativesEnabled();
+                if (!enabled) {
+                    sender.sendMessage("§c[PvP] " + category + " effects are disabled in config.yml (max-" + category + "-effects: 0).");
+                    return true;
+                }
                 set.add(keyOf(effectType));
                 applyPermanentEffects(target);
                 sender.sendMessage("§a[PvP] Added permanent " + formatName(effectType) + " to " + target.getName() + ".");
@@ -553,8 +581,15 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
     private void applyPermanentEffects(Player player) {
         UUID uuid = player.getUniqueId();
-        for (String name : permPositives.getOrDefault(uuid, Collections.emptySet())) applyInfinite(player, name);
-        for (String name : permNegatives.getOrDefault(uuid, Collections.emptySet())) applyInfinite(player, name);
+        boolean pos = positivesEnabled();
+        boolean neg = negativesEnabled();
+        // A disabled category is inactive: its stored effects are kept in players.yml but not applied.
+        for (String name : permPositives.getOrDefault(uuid, Collections.emptySet())) {
+            if (pos) applyInfinite(player, name); else removeEffectByKey(player, name);
+        }
+        for (String name : permNegatives.getOrDefault(uuid, Collections.emptySet())) {
+            if (neg) applyInfinite(player, name); else removeEffectByKey(player, name);
+        }
     }
 
     private void applyInfinite(Player player, String name) {
