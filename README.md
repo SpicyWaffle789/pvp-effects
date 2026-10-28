@@ -1,6 +1,6 @@
 # PvPEffects
 
-A Paper 26.3 Minecraft plugin that introduces custom death/kill potion effect mechanics, anti-farming kill limits, configurable effect caps, and Vault economy integration for purchasing positive effects and curing debuffs.
+A Paper 26.2+ Minecraft plugin (works on 26.3) that introduces custom death/kill potion effect mechanics, anti-farming kill limits, configurable effect caps, and Vault economy integration for purchasing positive effects and curing debuffs.
 
 ---
 
@@ -19,7 +19,7 @@ A Paper 26.3 Minecraft plugin that introduces custom death/kill potion effect me
 
 ## Requirements
 
-- **Paper, Spigot, or Purpur Server** (Version 26.3)
+- **Paper 26.2 or newer, including 26.3** (or a Paper fork such as Purpur). Spigot is not supported.
 - **Java 25** or higher
 - **Vault** (Plugin)
 - **An Economy Provider Plugin** (e.g., EssentialsX, CraftConomy)
@@ -61,11 +61,13 @@ A Paper 26.3 Minecraft plugin that introduces custom death/kill potion effect me
 # Old names (INCREASE_DAMAGE, FAST_DIGGING, ...) are still accepted and auto-converted.
 
 # Maximum number of permanent positive effects a player can hold simultaneously.
-# Set to 0 for unlimited.
+#   0  = positive effects are DISABLED (cannot be earned, bought or added; stored ones are not applied)
+#   -1 = unlimited
 max-positive-effects: 3
 
 # Maximum number of permanent negative effects a player can hold simultaneously.
-# Set to 0 for unlimited.
+#   0  = negative effects are DISABLED (no PvP penalties, no natural-death debuff, cures are unavailable)
+#   -1 = unlimited
 max-negative-effects: 3
 
 # Maximum times a player can earn effects from killing the same victim.
@@ -105,7 +107,4 @@ pricing:
   cure-all:
     percentage: 30.0
     min-cost: 75000.0
-    min-cost: 25000.0   # Minimum cost floor
-  cure-all:
-    percentage: 30.0    # Takes 30% of player's balance
-    min-cost: 75000.0   # Minimum cost floor
+```
