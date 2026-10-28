@@ -140,6 +140,7 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
 
         if (killer == null || killer.equals(victim)) {
             pendingTempDebuff.add(victim.getUniqueId());
+            savePlayerData(victim.getUniqueId()); // persisted, so quitting on the death screen can't dodge it
             victim.sendMessage("§e[PvP] You died of non-PvP causes. You will receive a temporary debuff on respawn.");
             return;
         }
@@ -171,7 +172,11 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         }
 
         PotionEffectType reward = getRandomUnownedEffect(positivePool, positives);
-        if (reward == null) return;
+        if (reward == null) {
+            killer.sendMessage("§e[PvP] You killed " + victim.getName()
+                    + ", but you already own every positive effect in the pool!");
+            return;
+        }
 
         // Only consume a kill "slot" when a reward is actually granted
         counts.put(victimId, current + 1);
@@ -190,7 +195,8 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             positives.remove(lost);
             PotionEffectType lostType = lookupEffect(lost);
             if (lostType != null) {
-                victim.removePotionEffect(lostType);
+                // No removePotionEffect needed: the player is dead and respawns with no effects;
+                // applyPermanentEffects() on respawn only re-adds what is still in the set.
                 victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and lost permanent " + formatName(lostType) + "!");
             }
             savePlayerData(victimId);
@@ -208,6 +214,9 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
         if (penalty != null) {
             addPermEffect(victim, permNegatives, penalty);
             victim.sendMessage("§c[PvP] You were slain by " + killer.getName() + " and received permanent " + formatName(penalty) + "!");
+        } else {
+            victim.sendMessage("§e[PvP] You were slain by " + killer.getName()
+                    + ", but you already have every negative effect in the pool!");
         }
     }
 
@@ -220,7 +229,9 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             if (!player.isOnline()) return;
             applyPermanentEffects(player);
 
-            if (pendingTempDebuff.remove(uuid) && !negativePool.isEmpty()) {
+            boolean owed = pendingTempDebuff.remove(uuid);
+            if (owed) savePlayerData(uuid);
+            if (owed && !negativePool.isEmpty()) {
                 PotionEffectType temp = negativePool.get(random.nextInt(negativePool.size()));
                 int ticks = getConfig().getInt("natural-death.duration-seconds", 300) * 20;
                 player.addPotionEffect(new PotionEffect(temp, ticks, 0));
@@ -587,12 +598,17 @@ public final class PvpEffectsPlugin extends JavaPlugin implements Listener, Comm
             for (String victimKey : sec.getKeys(false)) kills.put(victimKey, sec.getInt(victimKey));
         }
         claimedKills.put(uuid, kills);
+
+        if (dataConfig.getBoolean(uuid + ".pending-debuff", false)) pendingTempDebuff.add(uuid);
+        else pendingTempDebuff.remove(uuid);
     }
 
     /** Copies one player's in-memory state into the YAML tree and marks it for writing. */
     private void syncPlayer(UUID uuid) {
         dataConfig.set(uuid + ".positives", new ArrayList<>(permPositives.getOrDefault(uuid, Collections.emptySet())));
         dataConfig.set(uuid + ".negatives", new ArrayList<>(permNegatives.getOrDefault(uuid, Collections.emptySet())));
+
+        dataConfig.set(uuid + ".pending-debuff", pendingTempDebuff.contains(uuid) ? Boolean.TRUE : null);
 
         dataConfig.set(uuid + ".claimed-kills", null);
         for (Map.Entry<String, Integer> e : claimedKills.getOrDefault(uuid, Collections.emptyMap()).entrySet()) {
